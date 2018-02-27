@@ -24,13 +24,34 @@ class VAEMotionInterpolation:
 
         # build model
         self.image_shape = [None, self.size, self.size, 3]
-
-        self.real_a = tf.placeholder(
-            tf.int32, self.image_shape, name = 'real_a'
-        )
-        self.real_b = tf.placeholder(
-            tf.int32, self.image_shape, name = 'real_b'
-        )
+        
+        print("lookup training data...")
+        paths = glob("data/*.jpg")
+        
+        def tile_frame(path):
+            image = tf.image.decode_image(tf.read_file(path), 3)
+            return tf.data.Dataset.from_tensor_slices([
+                tf.reshape(
+                    image[y:y + self.size, x:x + self.size, :],
+                    [self.size, self.size, 3]
+                )
+                for x in range(0, 1920 - self.size, self.size)
+                for y in range(0, 1080 - self.size, self.size)
+            ])
+                    
+        def tile_frames(path_a, path_b):
+            return tf.data.Dataset.zip((
+                tile_frame(path_a), tile_frame(path_b)
+            ))
+        
+        d = tf.data.Dataset.from_tensor_slices(tf.constant(paths))
+        d = tf.data.Dataset.zip((d, d.skip(1)))
+        d = d.shuffle(1000000)
+        d = d.flat_map(tile_frames).shuffle(200).repeat()
+        d = d.batch(self.batch_size)
+        
+        iterator = d.make_one_shot_iterator()
+        self.real_a, self.real_b = iterator.get_next()
         
         float_real_a = self.preprocess(self.real_a)
         float_real_b = self.preprocess(self.real_b)
@@ -149,7 +170,7 @@ class VAEMotionInterpolation:
             assert(x.shape[1] == 1 and x.shape[2] == 1)
 
             mean = x[:, :, :, :self.dimensions]
-            deviation = tf.nn.softplus(x[:, :, :, self.dimensions:]) + 1e-8
+            deviation = tf.nn.softplus(x[:, :, :, self.dimensions:]) * 1e-2 + 1e-9
 
             return mean, deviation
 
@@ -177,45 +198,15 @@ class VAEMotionInterpolation:
             assert(images.shape[1] == self.size and images.shape[2] == self.size)
 
             return images
-
+ 
     def train(self):
-        print("lookup training data...")
-        frames = glob("data/*.jpg")
-
-        pairs = [(frames[i], frames[i + 1]) for i in range(len(frames) - 1)]
-
-        np.random.shuffle(pairs)
-
-        for batch in tqdm(np.array_split(pairs, len(pairs) // self.batch_size)):
-            path_a = [p[0] for p in batch]
-            path_b = [p[1] for p in batch]
-        
-            # select random crop
-            x = np.random.randint(0, 1920 - self.size)
-            y = np.random.randint(0, 1080 - self.size)
-
-            def load(paths):
-                images = []
-                for path in paths:
-                    i = scm.imread(path)
-                    if i.shape != (1080, 1920, 3):
-                        print("wrong shape: " + str(i.shape))
-                    i = i[y:y + self.size, x:x + self.size, :]
-                    images += [i]
-                return np.array(images)
-
-            image_a = load(path_a)
-            image_b = load(path_b)
-
-            _, step = self.session.run(
-                [self.optimizer, self.global_step],
-                {
-                    self.real_a: image_a,
-                    self.real_b: image_b
-                }
-            )
-
-            if step % 250 == 0:
+        while True:
+            for _ in tqdm(range(100)):
+                _, step = self.session.run(
+                    [self.optimizer, self.global_step]
+                )
+            
+            if step % 500 == 0:
                 print("saving iteration " + str(step))
                 self.saver.save(
                     self.session,
@@ -223,18 +214,17 @@ class VAEMotionInterpolation:
                     global_step=step
                 )
 
-            if step % 50 == 0:
-                interpolated, fake_a, fake_b, rl, ll, ml = self.session.run(
-                    [
-                        self.interpolated, self.fake_a, self.fake_b,
+            if step % 100 == 0:
+                real_a, real_b, interpolated, fake_a, fake_b, rl, ll, ml = \
+                    self.session.run([
+                        self.real_a[:4, :, :, :],
+                        self.real_b[:4, :, :, :],
+                        self.interpolated[:4, :, :, :], 
+                        self.fake_a[:4, :, :, :], 
+                        self.fake_b[:4, :, :, :],
                         self.reconstruction_loss, self.latent_loss, 
                         self.motion_loss
-                    ],
-                    {
-                        self.real_a: image_a[:4, :, :, :],
-                        self.real_b: image_b[:4, :, :, :]
-                    }
-                )
+                    ])
                 
                 print(
                     "rl: {:.4f}, ll: {:.4f}, ml: {:.4f}"
@@ -243,9 +233,9 @@ class VAEMotionInterpolation:
 
                 i = np.concatenate(
                     (
-                        image_a[:4, :, :, :], 
+                        real_a[:4, :, :, :], 
                         fake_a, interpolated, fake_b,
-                        image_b[:4, :, :, :]
+                        real_b[:4, :, :, :]
                     ),
                     axis = 2
                 )
@@ -254,11 +244,11 @@ class VAEMotionInterpolation:
                 )
 
                 scm.imsave("samples/{}.jpg".format(step) , i)
+            
 
     def test(self):
         r, step = self.session.run(
-            [self.random, self.global_step],
-            {}
+            [self.random, self.global_step]
         )
 
         i = np.concatenate(
