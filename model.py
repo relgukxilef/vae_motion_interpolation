@@ -9,7 +9,7 @@ from tqdm import tqdm
 class VAEMotionInterpolation:
     def __init__(
         self, session, continue_train = True, 
-        learning_rate = 2e-3, batch_size = 8
+        learning_rate = 5e-4, batch_size = 12
     ):
         self.session = session
         self.learning_rate = learning_rate
@@ -20,7 +20,7 @@ class VAEMotionInterpolation:
         self.dimensions = 1024 #self.filters * self.size**2 // 64
         self.checkpoint_path = "checkpoints"
 
-        self.global_step = tf.Variable(1, name = 'global_step')
+        self.global_step = tf.Variable(0, name = 'global_step')
 
         # build model
         self.image_shape = [None, self.size, self.size, 3]
@@ -47,10 +47,11 @@ class VAEMotionInterpolation:
         self.fake_a = self.postprocess(float_fake_a)
         self.fake_b = self.postprocess(float_fake_b)
 
-        self.interpolated = self.decoder(
+        self.interpolated = self.postprocess(self.decoder(
             (self.mean_a + self.mean_b) * 0.5
-        )
-        self.interpolated = self.decoder(self.mean_a)
+        ))
+        #self.interpolated = self.postprocess(self.decoder(self.mean_a))
+        
         self.random = self.decoder(tf.random_normal(
             [self.batch_size, 1, 1, self.dimensions]
         ))
@@ -214,7 +215,7 @@ class VAEMotionInterpolation:
                 }
             )
 
-            if step % 500 == 0:
+            if step % 250 == 0:
                 print("saving iteration " + str(step))
                 self.saver.save(
                     self.session,
@@ -222,10 +223,10 @@ class VAEMotionInterpolation:
                     global_step=step
                 )
 
-            if step % 10 == 0:
-                interpolated, rl, ll, ml = self.session.run(
+            if step % 50 == 0:
+                interpolated, fake_a, fake_b, rl, ll, ml = self.session.run(
                     [
-                        self.interpolated, 
+                        self.interpolated, self.fake_a, self.fake_b,
                         self.reconstruction_loss, self.latent_loss, 
                         self.motion_loss
                     ],
@@ -241,7 +242,11 @@ class VAEMotionInterpolation:
                 )
 
                 i = np.concatenate(
-                    (image_a[:4, :, :, :], interpolated, image_b[:4, :, :, :]),
+                    (
+                        image_a[:4, :, :, :], 
+                        fake_a, interpolated, fake_b,
+                        image_b[:4, :, :, :]
+                    ),
                     axis = 2
                 )
                 i = np.concatenate(
