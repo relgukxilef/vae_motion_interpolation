@@ -6,10 +6,10 @@ import os
 from glob import glob
 from tqdm import tqdm
 
-class VAEMotionInterpolation:
+class VAEMotionInterpolation(object):
     def __init__(
         self, session, continue_train = True, 
-        learning_rate = 5e-4, batch_size = 12
+        learning_rate = 1e-3, batch_size = 4
     ):
         self.session = session
         self.learning_rate = learning_rate
@@ -47,7 +47,7 @@ class VAEMotionInterpolation:
         d = tf.data.Dataset.from_tensor_slices(tf.constant(paths))
         d = tf.data.Dataset.zip((d, d.skip(1)))
         d = d.shuffle(1000000)
-        d = d.flat_map(tile_frames).shuffle(200).repeat()
+        d = d.flat_map(tile_frames).shuffle(500).repeat()
         d = d.batch(self.batch_size)
         
         iterator = d.make_one_shot_iterator()
@@ -56,10 +56,11 @@ class VAEMotionInterpolation:
         float_real_a = self.preprocess(self.real_a)
         float_real_b = self.preprocess(self.real_b)
 
-        self.mean_a, self.scale_a = self.encoder(float_real_a)
-        self.mean_b, self.scale_b = self.encoder(float_real_b)
+        self.mean_a, self.scale_a = self.encoder(float_real_a, True)
+        self.mean_b, self.scale_b = self.encoder(float_real_b, True)
         
         def sample(mean, scale):
+            #return mean
             return mean + scale * tf.random_normal(tf.shape(mean))
 
         float_fake_a = self.decoder(sample(self.mean_a, self.scale_a))
@@ -71,7 +72,6 @@ class VAEMotionInterpolation:
         self.interpolated = self.postprocess(self.decoder(
             (self.mean_a + self.mean_b) * 0.5
         ))
-        #self.interpolated = self.postprocess(self.decoder(self.mean_a))
         
         self.random = self.decoder(tf.random_normal(
             [self.batch_size, 1, 1, self.dimensions]
@@ -108,12 +108,15 @@ class VAEMotionInterpolation:
 
         self.loss = \
             self.reconstruction_loss + \
-            self.latent_loss * 1e-3 #+ \
-            #self.motion_loss
+            self.motion_loss# + \
+            #self.latent_loss * 1e-3
 
-        self.optimizer = tf.train.AdamOptimizer(
-            self.learning_rate
-        ).minimize(self.loss, self.global_step)
+        with tf.control_dependencies(
+            tf.get_collection(tf.GraphKeys.UPDATE_OPS)
+        ):
+            self.optimizer = tf.train.AdamOptimizer(
+                self.learning_rate
+            ).minimize(self.loss, self.global_step)
 
         self.saver = tf.train.Saver()
 
@@ -143,14 +146,16 @@ class VAEMotionInterpolation:
         return tf.cast(images, tf.float32) / 127.5 - 1.0
         
     def postprocess(self, images):
-        return tf.cast((images + 1.0) * 127.5, tf.int32)
+        return tf.cast(tf.minimum(tf.maximum(
+            (images + 1.0) * 127.5, 0
+        ), 255), tf.int32)
 
-    def encoder(self, images):
+    def encoder(self, images, training = False):
         with tf.variable_scope(
             'encoder', reuse = tf.AUTO_REUSE
         ):
             def layer(x, out, name):
-                return tf.layers.separable_conv2d(
+                return tf.layers.conv2d(
                     tf.nn.elu(x), 
                     out, [4, 4], [2, 2], 'same', name = 'conv' + name
                 )
@@ -159,18 +164,24 @@ class VAEMotionInterpolation:
             
             x = images
 
-            x = tf.layers.separable_conv2d(
-                x, filters * 4 * 2, [4, 4], [2, 2], 'same', name = 'conv1'
+            x = tf.layers.conv2d(
+                x, filters * 4, [4, 4], [2, 2], 'same', name = 'conv1'
             )
 
             for i in range(2, 9):
-                x = layer(x, min(filters * 4**i, self.dimensions) * 2, str(i))
+                x = layer(x, min(filters * 4**i, self.dimensions * 1), str(i))
 
             print(x.shape)
             assert(x.shape[1] == 1 and x.shape[2] == 1)
+            
+            x = x * 1e8
 
-            mean = x[:, :, :, :self.dimensions]
-            deviation = tf.nn.softplus(x[:, :, :, self.dimensions:]) * 1e-2 + 1e-9
+            #mean = x[:, :, :, :self.dimensions]
+            mean = tf.layers.batch_normalization(
+                x, training = training, trainable = False
+            )
+            #deviation = tf.nn.softplus(x[:, :, :, self.dimensions:]) + 1e-9
+            deviation = mean
 
             return mean, deviation
 
@@ -188,11 +199,13 @@ class VAEMotionInterpolation:
             x = feature
 
             for i in reversed(range(2, 9)):
-                x = layer(x, min(filters * 4**i, self.dimensions), str(i))
+                x = layer(x, min(filters * 4**(i - 1), self.dimensions), str(i))
+                
+            assert(x.shape[3] == filters * 4)
 
-            images = tf.nn.sigmoid(tf.layers.conv2d_transpose(
+            images = tf.nn.softsign(tf.layers.conv2d_transpose(
                 x, 3, [4, 4], [2, 2], 'same', name = 'deconv1'
-            )) * 2.0 - 1.0
+            ))# * 2.0 - 1.0
 
             print(images.shape)
             assert(images.shape[1] == self.size and images.shape[2] == self.size)
@@ -200,26 +213,15 @@ class VAEMotionInterpolation:
             return images
  
     def train(self):
+        step = 0
         while True:
-            for _ in tqdm(range(100)):
-                _, step = self.session.run(
-                    [self.optimizer, self.global_step]
-                )
-            
-            if step % 500 == 0:
-                print("saving iteration " + str(step))
-                self.saver.save(
-                    self.session,
-                    self.checkpoint_path + "/vaemi",
-                    global_step=step
-                )
-
             if step % 100 == 0:
                 real_a, real_b, interpolated, fake_a, fake_b, rl, ll, ml = \
                     self.session.run([
                         self.real_a[:4, :, :, :],
                         self.real_b[:4, :, :, :],
-                        self.interpolated[:4, :, :, :], 
+                        #self.postprocess(self.random[:4, :, :, :]), 
+                        self.interpolated[:4, :, :, :],
                         self.fake_a[:4, :, :, :], 
                         self.fake_b[:4, :, :, :],
                         self.reconstruction_loss, self.latent_loss, 
@@ -244,7 +246,19 @@ class VAEMotionInterpolation:
                 )
 
                 scm.imsave("samples/{}.jpg".format(step) , i)
-            
+                
+            for _ in tqdm(range(100)):
+                _, step = self.session.run(
+                    [self.optimizer, self.global_step]
+                )
+                
+            if step % 500 == 0:
+                print("saving iteration " + str(step))
+                self.saver.save(
+                    self.session,
+                    self.checkpoint_path + "/vaemi",
+                    global_step=step
+                )
 
     def test(self):
         r, step = self.session.run(
