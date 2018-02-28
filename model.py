@@ -16,7 +16,7 @@ class VAEMotionInterpolation(object):
         self.batch_size = batch_size
         self.continue_train = continue_train
         self.size = 256
-        self.filters = 4
+        self.filters = 8
         self.dimensions = 1024 #self.filters * self.size**2 // 64
         self.checkpoint_path = "checkpoints"
 
@@ -74,7 +74,7 @@ class VAEMotionInterpolation(object):
         ))
         
         self.random = self.decoder(tf.random_normal(
-            [self.batch_size, 1, 1, self.dimensions]
+            [self.batch_size, 2, 2, self.dimensions]
         ))
 
         # losses
@@ -168,20 +168,20 @@ class VAEMotionInterpolation(object):
                 x, filters * 4, [4, 4], [2, 2], 'same', name = 'conv1'
             )
 
-            for i in range(2, 9):
+            for i in range(2, 8):
                 x = layer(x, min(filters * 4**i, self.dimensions * 1), str(i))
 
             print(x.shape)
-            assert(x.shape[1] == 1 and x.shape[2] == 1)
+            assert(x.shape[1] == 2 and x.shape[2] == 2)
             
-            x = x * 1e8
+            #x = x * 1e8
 
             #mean = x[:, :, :, :self.dimensions]
             mean = tf.layers.batch_normalization(
                 x, training = training, trainable = False
             )
             #deviation = tf.nn.softplus(x[:, :, :, self.dimensions:]) + 1e-9
-            deviation = mean
+            deviation = tf.zeros_like(mean)
 
             return mean, deviation
 
@@ -198,14 +198,14 @@ class VAEMotionInterpolation(object):
 
             x = feature
 
-            for i in reversed(range(2, 9)):
+            for i in reversed(range(2, 8)):
                 x = layer(x, min(filters * 4**(i - 1), self.dimensions), str(i))
                 
             assert(x.shape[3] == filters * 4)
 
-            images = tf.nn.softsign(tf.layers.conv2d_transpose(
+            images = tf.nn.sigmoid(tf.layers.conv2d_transpose(
                 x, 3, [4, 4], [2, 2], 'same', name = 'deconv1'
-            ))# * 2.0 - 1.0
+            )) * 2.0 - 1.0
 
             print(images.shape)
             assert(images.shape[1] == self.size and images.shape[2] == self.size)
