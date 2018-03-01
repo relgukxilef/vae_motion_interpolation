@@ -17,7 +17,7 @@ class VAEMotionInterpolation:
         self.continue_train = continue_train
         self.size = 256
         self.filters = 4
-        self.dimensions = 1024 #self.filters * self.size**2 // 64
+        self.dimensions = 2**11 #self.filters * self.size**2 // 64
         self.checkpoint_path = "checkpoints"
 
         self.global_step = tf.Variable(0, name = 'global_step')
