@@ -69,9 +69,9 @@ class VAEMotionInterpolation:
         self.center = (sample(self.codes[0]) + sample(self.codes[2])) * 0.5
         self.interpolated = self.postprocess(self.decoder(self.center))
         
-        self.random = self.decoder(tf.random_normal(
+        self.random = self.postprocess(self.decoder(tf.random_normal(
             [self.batch_size, 8, 8, self.dimensions]
-        ))
+        )))
 
         # losses
         def difference(real, fake):
@@ -263,7 +263,4 @@ class VAEMotionInterpolation:
             [np.squeeze(x, 0) for x in np.split(r, r.shape[0])]
         )
 
-        i = (i + 1.0) * 127.5
-        i[i > 255] = 255.0
-        i[i < 0] = 0.0
         scm.imsave("test/{}.jpg".format(step) , i)
