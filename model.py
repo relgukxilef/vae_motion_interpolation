@@ -39,41 +39,35 @@ class VAEMotionInterpolation:
                 for y in range(0, 1080 - self.size, self.size)
             ])
                     
-        def tile_frames(path_a, path_b):
-            return tf.data.Dataset.zip((
-                tile_frame(path_a), tile_frame(path_b)
-            ))
+        def tile_frames(a, b, c):
+            return tf.data.Dataset.zip(
+                (tile_frame(a), tile_frame(b), tile_frame(c))
+            )
         
         d = tf.data.Dataset.from_tensor_slices(tf.constant(paths))
-        d = tf.data.Dataset.zip((d, d.skip(1)))
+        d = tf.data.Dataset.zip((d, d.skip(1), d.skip(2)))
         d = d.shuffle(1000000)
         d = d.flat_map(tile_frames).shuffle(200).repeat()
         d = d.batch(self.batch_size)
         
         iterator = d.make_one_shot_iterator()
-        self.real_a, self.real_b = iterator.get_next()
+        self.reals = iterator.get_next()
         
-        float_real_a = self.preprocess(self.real_a)
-        float_real_b = self.preprocess(self.real_b)
+        float_reals = [self.preprocess(r) for r in self.reals]
+        
+        self.codes = [self.encoder(r) for r in float_reals]
 
-        self.mean_a, self.scale_a = self.encoder(float_real_a)
-        self.mean_b, self.scale_b = self.encoder(float_real_b)
-        
-        def sample(mean, scale):
-            return mean + scale * tf.random_normal(
+        def sample(code):
+            return code[0] + code[1] * tf.random_normal(
                 [self.batch_size, 8, 8, self.dimensions]
             )
 
-        float_fake_a = self.decoder(sample(self.mean_a, self.scale_a))
-        float_fake_b = self.decoder(sample(self.mean_b, self.scale_b))
+        float_fakes = [self.decoder(sample(c)) for c in self.codes]
         
-        self.fake_a = self.postprocess(float_fake_a)
-        self.fake_b = self.postprocess(float_fake_b)
+        self.fakes = [self.postprocess(f) for f in float_fakes]
 
-        self.interpolated = self.postprocess(self.decoder(
-            (self.mean_a + self.mean_b) * 0.5
-        ))
-        #self.interpolated = self.postprocess(self.decoder(self.mean_a))
+        self.center = (sample(self.codes[0]) + sample(self.codes[2])) * 0.5
+        self.interpolated = self.postprocess(self.decoder(self.center))
         
         self.random = self.decoder(tf.random_normal(
             [self.batch_size, 8, 8, self.dimensions]
@@ -83,37 +77,35 @@ class VAEMotionInterpolation:
         def difference(real, fake):
             return tf.reduce_mean(tf.norm(tf.abs(real - fake) + 1e-8, axis = -1))
 
-        self.reconstruction_loss = \
-            difference(float_real_a, float_fake_a) + \
-            difference(float_real_b, float_fake_b)
+        self.reconstruction_loss = tf.reduce_mean(
+            [difference(r, f) for r, f in zip(float_reals, float_fakes)]
+        )
             
-        print("real_a", float_real_a.shape, "real_b", float_real_b.shape)
-
-        def divergence(mean, scale):
+        def divergence(code):
             # from
             # https://github.com/shaohua0116/VAE-Tensorflow/blob/master/demo.py
             return tf.reduce_mean(
                 0.5 * tf.reduce_sum(
-                    tf.square(mean) +
-                    tf.square(scale) -
-                    tf.log(1e-8 + tf.square(scale)) - 1,
+                    tf.square(code[0]) +
+                    tf.square(code[1]) -
+                    tf.log(1e-8 + tf.square(code[1])) - 1,
                     1
                 )
             )
 
-        self.latent_loss = \
-            divergence(self.mean_a, self.scale_a) + \
-            divergence(self.mean_b, self.scale_b)
+        self.latent_loss = tf.reduce_mean(
+            [divergence(c) for c in self.codes]
+        )
 
         self.motion_loss = difference(
-            sample(self.mean_a, self.scale_a), 
-            sample(self.mean_b, self.scale_b)
+            sample(self.codes[1]), 
+            self.center
         )
 
         self.loss = \
             self.reconstruction_loss + \
-            self.latent_loss * 1e-4 + \
-            self.motion_loss# * 1e-2
+            self.latent_loss * 1e-3 + \
+            self.motion_loss
 
         self.optimizer = tf.train.AdamOptimizer(
             self.learning_rate
@@ -181,7 +173,7 @@ class VAEMotionInterpolation:
 
             mean = x
             deviation = tf.nn.softplus(
-                tf.layers.dense(x, self.dimensions, name = 'dense')
+                tf.layers.dense(x, self.dimensions, name = 'dense') - 10.0
             ) + 1e-9
 
             return mean, deviation
@@ -220,11 +212,11 @@ class VAEMotionInterpolation:
             if step % 100 == 0:
                 real_a, real_b, interpolated, fake_a, fake_b, rl, ll, ml = \
                     self.session.run([
-                        self.postprocess(self.preprocess(self.real_a[:4, :, :, :])),
-                        self.real_b[:4, :, :, :],
+                        self.reals[0][:4, :, :, :],
+                        self.reals[2][:4, :, :, :],
                         self.interpolated[:4, :, :, :], 
-                        self.fake_a[:4, :, :, :], 
-                        self.fake_b[:4, :, :, :],
+                        self.fakes[0][:4, :, :, :], 
+                        self.fakes[2][:4, :, :, :],
                         self.reconstruction_loss, self.latent_loss, 
                         self.motion_loss
                     ])
