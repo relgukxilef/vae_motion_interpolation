@@ -89,7 +89,7 @@ class VAEMotionInterpolation:
                     tf.square(code[0]) +
                     tf.square(code[1]) -
                     tf.log(1e-8 + tf.square(code[1])) - 1,
-                    1
+                    3
                 )
             )
 
@@ -102,10 +102,11 @@ class VAEMotionInterpolation:
             self.center
         )
 
-        self.loss = \
-            self.reconstruction_loss + \
-            self.latent_loss * 1e-3 + \
+        self.loss = sum([
+            self.reconstruction_loss,
+            self.latent_loss * 1e-6,
             self.motion_loss
+        ])
 
         self.optimizer = tf.train.AdamOptimizer(
             self.learning_rate
