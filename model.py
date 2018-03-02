@@ -35,8 +35,8 @@ class VAEMotionInterpolation:
                     image[y:y + self.size, x:x + self.size, :],
                     [self.size, self.size, 3]
                 )
-                for x in range(0, 1920 - self.size, self.size)
-                for y in range(0, 1080 - self.size, self.size)
+                for x in range(0, 1718 - self.size, self.size)
+                for y in range(0, 720 - self.size, self.size)
             ])
                     
         def tile_frames(a, b, c):
@@ -67,7 +67,8 @@ class VAEMotionInterpolation:
         self.fakes = [self.postprocess(f) for f in float_fakes]
 
         self.center = (sample(self.codes[0]) + sample(self.codes[2])) * 0.5
-        self.interpolated = self.postprocess(self.decoder(self.center))
+        float_interpolated = self.decoder(self.center)
+        self.interpolated = self.postprocess(float_interpolated)
         
         self.random = self.postprocess(self.decoder(tf.random_normal(
             [self.batch_size, 8, 8, self.dimensions]
@@ -98,8 +99,13 @@ class VAEMotionInterpolation:
         )
 
         self.motion_loss = difference(
-            sample(self.codes[1]), 
-            self.center
+            float_reals[1], 
+            float_interpolated
+        )
+        
+        self.blend_loss = difference(
+            float_reals[1],
+            (float_fakes[0] + float_fakes[2]) * 0.5
         )
 
         self.loss = sum([
@@ -211,27 +217,29 @@ class VAEMotionInterpolation:
         
         while True:
             if step % 100 == 0:
-                real_a, real_b, interpolated, fake_a, fake_b, rl, ll, ml = \
+                real_a, real_b, real_c, interpolated, \
+                fake_a, fake_c, rl, ll, ml, bl = \
                     self.session.run([
                         self.reals[0][:4, :, :, :],
+                        self.reals[1][:4, :, :, :],
                         self.reals[2][:4, :, :, :],
                         self.interpolated[:4, :, :, :], 
                         self.fakes[0][:4, :, :, :], 
                         self.fakes[2][:4, :, :, :],
                         self.reconstruction_loss, self.latent_loss, 
-                        self.motion_loss
+                        self.motion_loss, self.blend_loss
                     ])
                 
                 print(
-                    "rl: {:.4f}, ll: {:.4f}, ml: {:.4f}"
-                    .format(rl, ll, ml)
+                    "rl: {:.4f}, ll: {:.4f}, ml: {:.4f}, bl: {:.4f}"
+                    .format(rl, ll, ml, bl)
                 )
 
                 i = np.concatenate(
                     (
-                        real_a[:4, :, :, :], 
-                        fake_a, interpolated, fake_b,
-                        real_b[:4, :, :, :]
+                        real_a, 
+                        fake_a, interpolated, real_b, fake_c,
+                        real_c
                     ),
                     axis = 2
                 )
