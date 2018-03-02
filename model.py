@@ -3,6 +3,7 @@ import scipy.misc as scm
 import tensorflow as tf
 import os
 
+from math import floor
 from glob import glob
 from tqdm import tqdm
 
@@ -26,7 +27,7 @@ class VAEMotionInterpolation:
         self.image_shape = [None, self.size, self.size, 3]
         
         print("lookup training data...")
-        paths = glob("data/*.jpg")
+        self.paths = glob("data/*.jpg")
         
         def tile_frame(path):
             image = tf.image.decode_image(tf.read_file(path), 3)
@@ -44,7 +45,7 @@ class VAEMotionInterpolation:
                 (tile_frame(a), tile_frame(b), tile_frame(c))
             )
         
-        d = tf.data.Dataset.from_tensor_slices(tf.constant(paths))
+        d = tf.data.Dataset.from_tensor_slices(tf.constant(self.paths))
         d = tf.data.Dataset.zip((d, d.skip(1), d.skip(2)))
         d = d.shuffle(1000000)
         d = d.flat_map(tile_frames).shuffle(200).repeat()
@@ -176,7 +177,7 @@ class VAEMotionInterpolation:
                 x = layer(x, min(filters * 4**i, self.dimensions), str(i))
 
             print(x.shape)
-            assert(x.shape[1] == 8 and x.shape[2] == 8)
+            #assert(x.shape[1] == 8 and x.shape[2] == 8)
 
             mean = x
             deviation = tf.nn.softplus(
@@ -208,7 +209,7 @@ class VAEMotionInterpolation:
             )) * 2.0 - 1.0
 
             print(images.shape)
-            assert(images.shape[1] == self.size and images.shape[2] == self.size)
+            #assert(images.shape[1] == self.size and images.shape[2] == self.size)
 
             return images
  
@@ -272,3 +273,54 @@ class VAEMotionInterpolation:
         )
 
         scm.imsave("test/{}.jpg".format(step) , i)
+        
+    def interpolate_video(self, start, end, factor):
+        befores = []
+        afters = []
+        ratios = []
+        
+        for f in range(round(start * factor), round(end * factor)):
+            p = f / factor
+            befores += [self.paths[floor(p)]]
+            afters += [self.paths[floor(p) + 1]]
+            ratios += [p - floor(p)]
+        
+        d = tf.data.Dataset.zip((
+            tf.data.Dataset.from_tensor_slices(befores),
+            tf.data.Dataset.from_tensor_slices(afters),
+            tf.data.Dataset.from_tensor_slices(ratios),
+            tf.data.Dataset.from_tensor_slices(
+                ["out/{:06d}.jpg".format(i) for i in range(0, len(ratios))]
+            )
+        ))
+        
+        def load_frame(path):
+            image = self.preprocess(
+                tf.image.decode_image(tf.read_file(path), 3)
+            )
+            width = (1718 // 32) * 32
+            height = (720 // 32) * 32
+            return tf.reshape(image[:height, :width, :], [1, height, width, 3])
+            
+        def load_frames(a, b, r, i):
+            return load_frame(a), load_frame(b), r, i
+        
+        d = d.map(load_frames)
+        
+        a, b, r, i = d.make_one_shot_iterator().get_next()
+        
+        print(a.shape)
+        
+        interpolate_frame = tf.write_file(
+            i,
+            tf.image.encode_jpeg(
+                tf.cast(self.postprocess(self.decoder(
+                    self.encoder(a)[0] * (1 - r) +
+                    self.encoder(b)[0] * r
+                ))[0, :, :, :], tf.uint8),
+                quality = 100
+            )
+        )
+        
+        for i in tqdm(range(len(ratios))):
+            self.session.run(interpolate_frame)

@@ -13,7 +13,7 @@ def main(_):
 
     with tf.Session() as session:
         model = VAEMotionInterpolation(session)
-        model.train() if args.phase == 'train' else model.test()
+        model.train() if args.phase == 'train' else model.interpolate_video(2376, 2923, 60/24)
 
 if __name__ == '__main__':
     tf.app.run()
