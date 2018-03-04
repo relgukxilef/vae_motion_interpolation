@@ -10,7 +10,7 @@ from tqdm import tqdm
 class VAEMotionInterpolation:
     def __init__(
         self, session, continue_train = True, 
-        learning_rate = 1e-3, batch_size = 32
+        learning_rate = 1e-3, batch_size = 16
     ):
         self.session = session
         self.learning_rate = learning_rate
@@ -18,7 +18,7 @@ class VAEMotionInterpolation:
         self.continue_train = continue_train
         self.size = 256
         self.filters = 4
-        self.dimensions = 2**11 #self.filters * self.size**2 // 64
+        self.dimensions = 2**11
         self.checkpoint_path = "checkpoints"
 
         self.global_step = tf.Variable(0, name = 'global_step')
@@ -56,68 +56,98 @@ class VAEMotionInterpolation:
         
         float_reals = [self.preprocess(r) for r in self.reals]
         
-        self.codes = [self.encoder(r) for r in float_reals]
-
         def sample(code):
-            return code[0] + code[1] * tf.random_normal(
-                [self.batch_size, 8, 8, self.dimensions]
+            return (
+                code[:, :, :, :self.dimensions] + 
+                code[:, :, :, self.dimensions:] * tf.random_normal(
+                    [self.batch_size, 8, 8, self.dimensions]
+                )
             )
 
-        float_fakes = [self.decoder(sample(c)) for c in self.codes]
+        code_0 = self.encoder(float_reals[0])
+        code_2 = self.encoder(float_reals[2])
+        float_fake = self.decoder(sample((code_0 + code_2) * 0.5))
         
-        self.fakes = [self.postprocess(f) for f in float_fakes]
-
-        self.center = (sample(self.codes[0]) + sample(self.codes[2])) * 0.5
-        float_interpolated = self.decoder(self.center)
-        self.interpolated = self.postprocess(float_interpolated)
+        self.fake = self.postprocess(float_fake)
         
         self.random = self.postprocess(self.decoder(tf.random_normal(
             [self.batch_size, 8, 8, self.dimensions]
         )))
 
-        # losses
+        # losses        
         def difference(real, fake):
             return tf.reduce_mean(tf.norm(tf.abs(real - fake) + 1e-8, axis = -1))
 
-        self.reconstruction_loss = tf.reduce_mean(
-            [difference(r, f) for r, f in zip(float_reals, float_fakes)]
+        self.reconstruction_loss = -tf.reduce_mean(
+            self.discriminator(float_reals[0], float_fake, float_reals[2])
         )
             
         def divergence(code):
             # from
             # https://github.com/shaohua0116/VAE-Tensorflow/blob/master/demo.py
+            mean = code[:, :, :, :self.dimensions]
+            deviation = code[:, :, :, self.dimensions:]
             return tf.reduce_mean(
                 0.5 * tf.reduce_sum(
-                    tf.square(code[0]) +
-                    tf.square(code[1]) -
-                    tf.log(1e-8 + tf.square(code[1])) - 1,
+                    tf.square(mean) +
+                    tf.square(deviation) -
+                    tf.log(1e-8 + tf.square(deviation)) - 1,
                     3
                 )
             )
 
         self.latent_loss = tf.reduce_mean(
-            [divergence(c) for c in self.codes]
+            [divergence(code_0), divergence(code_2)]
         )
 
-        self.motion_loss = difference(
-            float_reals[1], 
-            float_interpolated
+        self.g_loss = sum([
+            self.reconstruction_loss,
+            self.latent_loss * 1e-6
+        ])
+        
+        real_score = self.discriminator(
+            float_reals[0], float_reals[1], float_reals[2]
+        )
+        fake_score = self.discriminator(
+            float_reals[0], float_fake, float_reals[2]
         )
         
-        self.blend_loss = difference(
-            float_reals[1],
-            (float_fakes[0] + float_fakes[2]) * 0.5
+        ratio = tf.random_uniform([self.batch_size, 1, 1, 1], 0.0, 1.0)
+        random_mix = float_reals[1] * (1 - ratio) + float_fake * ratio
+        
+        gradients = tf.gradients(
+            self.discriminator(float_reals[0], random_mix, float_reals[2]), 
+            random_mix
+        )
+        
+        gradient_penalty = tf.reduce_mean(tf.square(
+            tf.sqrt(
+                tf.reduce_sum(tf.square(gradients), axis=[1, 2, 3])
+            ) - 1.0
+        ))
+        
+        self.gradient_penalty = gradient_penalty
+        
+        self.d_loss = \
+            tf.reduce_mean([fake_score, -real_score]) + \
+            gradient_penalty * 1e2
+        
+        variables = tf.trainable_variables()
+        g_variables = [v for v in variables if 'discriminator' not in v.name]
+        d_variables = [v for v in variables if 'discriminator' in v.name]
+        print(len(d_variables), len(g_variables))
+
+        self.g_optimizer = tf.train.AdamOptimizer(
+            self.learning_rate
+        ).minimize(
+            self.g_loss, self.global_step, g_variables
         )
 
-        self.loss = sum([
-            self.reconstruction_loss,
-            self.latent_loss * 1e-6,
-            self.motion_loss
-        ])
-
-        self.optimizer = tf.train.AdamOptimizer(
-            self.learning_rate
-        ).minimize(self.loss, self.global_step)
+        self.d_optimizer = tf.train.AdamOptimizer(
+            self.learning_rate * 2
+        ).minimize(
+            self.d_loss, var_list = d_variables
+        )
 
         self.saver = tf.train.Saver()
 
@@ -179,12 +209,13 @@ class VAEMotionInterpolation:
             print(x.shape)
             #assert(x.shape[1] == 8 and x.shape[2] == 8)
 
-            mean = x
+            mean = tf.layers.dense(x, self.dimensions, name = 'dense1')
+            
             deviation = tf.nn.softplus(
-                tf.layers.dense(x, self.dimensions, name = 'dense') - 10.0
+                tf.layers.dense(x, self.dimensions, name = 'dense2') - 10.0
             ) + 1e-9
 
-            return mean, deviation
+            return tf.concat([mean, deviation], 3)
 
     def decoder(self, feature):
         with tf.variable_scope(
@@ -213,33 +244,52 @@ class VAEMotionInterpolation:
 
             return images
  
+    def discriminator(self, a, b, c):
+        with tf.variable_scope(
+            'discriminator', reuse = tf.AUTO_REUSE
+        ):
+            def layer(x, out, name):
+                return tf.nn.elu(tf.layers.max_pooling2d(
+                    tf.layers.conv2d(
+                        x, out, [4, 4], [1, 1], 'same', 
+                        name = 'conv' + name
+                    ), 2, 2, 'same'
+                ))
+                
+            filters = 8
+            x = tf.concat([a, b, c], 3)
+            
+            while x.shape[1] > 1:
+                x = layer(x, filters, str(filters))
+                filters *= 2
+                
+            return tf.layers.dense(x, 1, name = 'dense')
+    
     def train(self):
         step = 0
         
         while True:
             if step % 100 == 0:
                 real_a, real_b, real_c, interpolated, \
-                fake_a, fake_c, rl, ll, ml, bl = \
+                g_loss, d_loss, gradient_penalty, ll = \
                     self.session.run([
                         self.reals[0][:4, :, :, :],
                         self.reals[1][:4, :, :, :],
                         self.reals[2][:4, :, :, :],
-                        self.interpolated[:4, :, :, :], 
-                        self.fakes[0][:4, :, :, :], 
-                        self.fakes[2][:4, :, :, :],
-                        self.reconstruction_loss, self.latent_loss, 
-                        self.motion_loss, self.blend_loss
+                        self.fake[:4, :, :, :], 
+                        self.g_loss, self.d_loss, self.gradient_penalty,
+                        self.latent_loss
                     ])
                 
                 print(
-                    "rl: {:.4f}, ll: {:.4f}, ml: {:.4f}, bl: {:.4f}"
-                    .format(rl, ll, ml, bl)
+                    "g_loss: {:.4f}, d_loss: {:.4f}, gp: {:.4f}, {:.4f}bits"
+                    .format(g_loss, d_loss, gradient_penalty, ll)
                 )
 
                 i = np.concatenate(
                     (
                         real_a, 
-                        fake_a, interpolated, real_b, fake_c,
+                        real_b, interpolated,
                         real_c
                     ),
                     axis = 2
@@ -252,7 +302,11 @@ class VAEMotionInterpolation:
                 
             for _ in tqdm(range(100)):
                 _, step = self.session.run(
-                    [self.optimizer, self.global_step]
+                    [self.g_optimizer, self.global_step]
+                )
+                #for i in range(2):
+                self.session.run(
+                    self.d_optimizer
                 )
                 
             if step % 500 == 0:
@@ -298,8 +352,8 @@ class VAEMotionInterpolation:
             image = self.preprocess(
                 tf.image.decode_image(tf.read_file(path), 3)
             )
-            width = (1718 // 32) * 32
-            height = (720 // 32) * 32
+            width = (1920 // 32) * 32
+            height = (1080 // 32) * 32
             return tf.reshape(image[:height, :width, :], [1, height, width, 3])
             
         def load_frames(a, b, r, i):
