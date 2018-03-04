@@ -10,7 +10,7 @@ from tqdm import tqdm
 class VAEMotionInterpolation:
     def __init__(
         self, session, continue_train = True, 
-        learning_rate = 1e-3, batch_size = 16
+        learning_rate = 1e-4, batch_size = 16
     ):
         self.session = session
         self.learning_rate = learning_rate
@@ -80,7 +80,9 @@ class VAEMotionInterpolation:
 
         self.reconstruction_loss = -tf.reduce_mean(
             self.discriminator(float_reals[0], float_fake, float_reals[2])
-        )
+        )# + difference(float_fake, float_reals[1]) * tf.maximum((1e3 - tf.cast(self.global_step, tf.float32)) / 1e3, 0.0)
+        
+        #self.reconstruction_loss = difference(float_fake, float_reals[1])
             
         def divergence(code):
             # from
@@ -116,35 +118,40 @@ class VAEMotionInterpolation:
         random_mix = float_reals[1] * (1 - ratio) + float_fake * ratio
         
         gradients = tf.gradients(
-            self.discriminator(float_reals[0], random_mix, float_reals[2]), 
+            tf.reduce_mean(
+                self.discriminator(float_reals[0], random_mix, float_reals[2])
+            ), 
             random_mix
-        )
+        )[0]
         
-        gradient_penalty = tf.reduce_mean(tf.square(
-            tf.sqrt(
-                tf.reduce_sum(tf.square(gradients), axis=[1, 2, 3])
-            ) - 1.0
-        ))
+        gradient_penalty = tf.reduce_mean(
+            (
+                tf.sqrt(
+                    tf.reduce_sum(
+                        (tf.abs(gradients) + 1e-6) ** 2, axis=[1, 2, 3]
+                    )
+                ) - 1.0
+            ) ** 2
+        )
         
         self.gradient_penalty = gradient_penalty
         
         self.d_loss = \
-            tf.reduce_mean([fake_score, -real_score]) + \
-            gradient_penalty * 1e2
+            tf.reduce_mean(fake_score) - tf.reduce_mean(real_score) + \
+            gradient_penalty * 1e1
         
         variables = tf.trainable_variables()
         g_variables = [v for v in variables if 'discriminator' not in v.name]
         d_variables = [v for v in variables if 'discriminator' in v.name]
-        print(len(d_variables), len(g_variables))
 
         self.g_optimizer = tf.train.AdamOptimizer(
-            self.learning_rate
+            self.learning_rate * 0.5, epsilon = 1e-2
         ).minimize(
-            self.g_loss, self.global_step, g_variables
+            self.g_loss, self.global_step, var_list = g_variables
         )
 
         self.d_optimizer = tf.train.AdamOptimizer(
-            self.learning_rate * 2
+            self.learning_rate, epsilon = 1e-2
         ).minimize(
             self.d_loss, var_list = d_variables
         )
@@ -259,9 +266,11 @@ class VAEMotionInterpolation:
             filters = 8
             x = tf.concat([a, b, c], 3)
             
-            while x.shape[1] > 1:
+            while x.shape[1] > 4:
                 x = layer(x, filters, str(filters))
                 filters *= 2
+                
+            x = tf.nn.elu(tf.reduce_max(x, [1, 2]))
                 
             return tf.layers.dense(x, 1, name = 'dense')
     
@@ -269,7 +278,7 @@ class VAEMotionInterpolation:
         step = 0
         
         while True:
-            if step % 100 == 0:
+            if step % 50 == 0:
                 real_a, real_b, real_c, interpolated, \
                 g_loss, d_loss, gradient_penalty, ll = \
                     self.session.run([
@@ -300,14 +309,18 @@ class VAEMotionInterpolation:
 
                 scm.imsave("samples/{}.jpg".format(step) , i)
                 
-            for _ in tqdm(range(100)):
+            for _ in tqdm(range(50)):
+                for i in range(1):
+                    self.session.run(
+                        self.d_optimizer
+                    )
                 _, step = self.session.run(
                     [self.g_optimizer, self.global_step]
                 )
                 #for i in range(2):
-                self.session.run(
-                    self.d_optimizer
-                )
+                #    self.session.run(
+                #        self.d_optimizer
+                #    )
                 
             if step % 500 == 0:
                 print("saving iteration " + str(step))
