@@ -10,7 +10,7 @@ from tqdm import tqdm
 class VAEMotionInterpolation:
     def __init__(
         self, session, continue_train = True, 
-        learning_rate = 1e-4, batch_size = 16
+        learning_rate = 1e-3, batch_size = 16
     ):
         self.session = session
         self.learning_rate = learning_rate
@@ -57,6 +57,7 @@ class VAEMotionInterpolation:
         float_reals = [self.preprocess(r) for r in self.reals]
         
         def sample(code):
+            #return code[:, :, :, :self.dimensions]
             return (
                 code[:, :, :, :self.dimensions] + 
                 code[:, :, :, self.dimensions:] * tf.random_normal(
@@ -80,7 +81,7 @@ class VAEMotionInterpolation:
 
         self.reconstruction_loss = -tf.reduce_mean(
             self.discriminator(float_reals[0], float_fake, float_reals[2])
-        )# + difference(float_fake, float_reals[1]) * tf.maximum((1e3 - tf.cast(self.global_step, tf.float32)) / 1e3, 0.0)
+        ) #+ difference(float_fake, float_reals[1]) * 1e-2# * tf.maximum((1e3 - tf.cast(self.global_step, tf.float32)) / 1e3, 0.0)
         
         #self.reconstruction_loss = difference(float_fake, float_reals[1])
             
@@ -103,7 +104,7 @@ class VAEMotionInterpolation:
         )
 
         self.g_loss = sum([
-            self.reconstruction_loss,
+            self.reconstruction_loss,# * 1e-2,
             self.latent_loss * 1e-6
         ])
         
@@ -116,6 +117,7 @@ class VAEMotionInterpolation:
         
         ratio = tf.random_uniform([self.batch_size, 1, 1, 1], 0.0, 1.0)
         random_mix = float_reals[1] * (1 - ratio) + float_fake * ratio
+        self.random_mix = self.postprocess(random_mix)
         
         gradients = tf.gradients(
             tf.reduce_mean(
@@ -128,7 +130,7 @@ class VAEMotionInterpolation:
             (
                 tf.sqrt(
                     tf.reduce_sum(
-                        (tf.abs(gradients) + 1e-6) ** 2, axis=[1, 2, 3]
+                        (tf.abs(gradients) + 1e-8) ** 2, axis=[1, 2, 3]
                     )
                 ) - 1.0
             ) ** 2
@@ -136,22 +138,24 @@ class VAEMotionInterpolation:
         
         self.gradient_penalty = gradient_penalty
         
-        self.d_loss = \
-            tf.reduce_mean(fake_score) - tf.reduce_mean(real_score) + \
+        self.d_loss = (
+            tf.reduce_mean(fake_score) - # * 1e-2 - 
+            tf.reduce_mean(real_score) + # * 1e-2 + 
             gradient_penalty * 1e1
+        )
         
         variables = tf.trainable_variables()
         g_variables = [v for v in variables if 'discriminator' not in v.name]
         d_variables = [v for v in variables if 'discriminator' in v.name]
 
         self.g_optimizer = tf.train.AdamOptimizer(
-            self.learning_rate * 0.5, epsilon = 1e-2
+            self.learning_rate#, epsilon = 1e-2
         ).minimize(
             self.g_loss, self.global_step, var_list = g_variables
         )
 
         self.d_optimizer = tf.train.AdamOptimizer(
-            self.learning_rate, epsilon = 1e-2
+            self.learning_rate * 2#, epsilon = 1e-2
         ).minimize(
             self.d_loss, var_list = d_variables
         )
@@ -245,6 +249,10 @@ class VAEMotionInterpolation:
             images = tf.nn.sigmoid(tf.layers.conv2d_transpose(
                 x, 3, [4, 4], [2, 2], 'same', name = 'deconv1'
             )) * 2.0 - 1.0
+            
+            images = tf.layers.conv2d_transpose(
+                x, 3, [4, 4], [2, 2], 'same', name = 'deconv1'
+            )
 
             print(images.shape)
             #assert(images.shape[1] == self.size and images.shape[2] == self.size)
@@ -256,7 +264,7 @@ class VAEMotionInterpolation:
             'discriminator', reuse = tf.AUTO_REUSE
         ):
             def layer(x, out, name):
-                return tf.nn.elu(tf.layers.max_pooling2d(
+                return tf.nn.leaky_relu(tf.layers.max_pooling2d(
                     tf.layers.conv2d(
                         x, out, [4, 4], [1, 1], 'same', 
                         name = 'conv' + name
@@ -266,11 +274,11 @@ class VAEMotionInterpolation:
             filters = 8
             x = tf.concat([a, b, c], 3)
             
-            while x.shape[1] > 4:
+            while x.shape[1] > 8:
                 x = layer(x, filters, str(filters))
                 filters *= 2
                 
-            x = tf.nn.elu(tf.reduce_max(x, [1, 2]))
+            x = tf.nn.leaky_relu(tf.reduce_max(x, [1, 2]))
                 
             return tf.layers.dense(x, 1, name = 'dense')
     
