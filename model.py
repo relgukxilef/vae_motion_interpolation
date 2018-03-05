@@ -105,7 +105,7 @@ class VAEMotionInterpolation:
 
         self.g_loss = sum([
             self.reconstruction_loss,# * 1e-2,
-            self.latent_loss * 1e-6
+            self.latent_loss * 1e-4
         ])
         
         real_score = self.discriminator(
@@ -138,24 +138,29 @@ class VAEMotionInterpolation:
         
         self.gradient_penalty = gradient_penalty
         
-        self.d_loss = (
-            tf.reduce_mean(fake_score) - # * 1e-2 - 
-            tf.reduce_mean(real_score) + # * 1e-2 + 
-            gradient_penalty * 1e1
+        self.distance = (
+            tf.reduce_mean(fake_score) -
+            tf.reduce_mean(real_score)
         )
+        
+        self.d_loss = (
+            self.distance + # * 1e-2 + 
+            gradient_penalty * 1e2
+        )
+        
         
         variables = tf.trainable_variables()
         g_variables = [v for v in variables if 'discriminator' not in v.name]
         d_variables = [v for v in variables if 'discriminator' in v.name]
 
         self.g_optimizer = tf.train.AdamOptimizer(
-            self.learning_rate#, epsilon = 1e-2
+            self.learning_rate * 0.5#, epsilon = 1e-2
         ).minimize(
             self.g_loss, self.global_step, var_list = g_variables
         )
 
         self.d_optimizer = tf.train.AdamOptimizer(
-            self.learning_rate * 2#, epsilon = 1e-2
+            self.learning_rate#, epsilon = 1e-2
         ).minimize(
             self.d_loss, var_list = d_variables
         )
@@ -286,21 +291,21 @@ class VAEMotionInterpolation:
         step = 0
         
         while True:
-            if step % 50 == 0:
+            if step % 100 == 0:
                 real_a, real_b, real_c, interpolated, \
-                g_loss, d_loss, gradient_penalty, ll = \
+                distance, gradient_penalty, ll = \
                     self.session.run([
                         self.reals[0][:4, :, :, :],
                         self.reals[1][:4, :, :, :],
                         self.reals[2][:4, :, :, :],
                         self.fake[:4, :, :, :], 
-                        self.g_loss, self.d_loss, self.gradient_penalty,
+                        -self.distance, self.gradient_penalty,
                         self.latent_loss
                     ])
                 
                 print(
-                    "g_loss: {:.4f}, d_loss: {:.4f}, gp: {:.4f}, {:.4f}bits"
-                    .format(g_loss, d_loss, gradient_penalty, ll)
+                    "distance: {:.4f}, gp: {:.4f}, {:.4f}bits"
+                    .format(distance, gradient_penalty, ll)
                 )
 
                 i = np.concatenate(
@@ -317,7 +322,7 @@ class VAEMotionInterpolation:
 
                 scm.imsave("samples/{}.jpg".format(step) , i)
                 
-            for _ in tqdm(range(50)):
+            for _ in tqdm(range(100)):
                 for i in range(1):
                     self.session.run(
                         self.d_optimizer
@@ -330,7 +335,7 @@ class VAEMotionInterpolation:
                 #        self.d_optimizer
                 #    )
                 
-            if step % 500 == 0:
+            if step % 1000 == 0:
                 print("saving iteration " + str(step))
                 self.saver.save(
                     self.session,
